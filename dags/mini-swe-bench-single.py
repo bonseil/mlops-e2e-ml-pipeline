@@ -1,22 +1,50 @@
+import os
 from datetime import datetime
+from pathlib import Path
+import subprocess
 
-from airflow import DAG
-from airflow.providers.docker.operators.docker import BashOperator
+from airflow.decorators import dag, task
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-with DAG(
-    dag_id="mini-swebench",
+@dag(
+    dag_id="mini-swe-bench-single",
     start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
-) as dag:
+)
+def my_dag():
+    @task
+    def run_script():
+        subprocess.run(
+            [
+                "uv",
+                "run",
+                "mini-extra",
+                "swebench-single",
+                "--subset",
+                "verified",
+                "--split",
+                "test",
+                "--model",
+                "nebius/moonshotai/Kimi-K2.6",
+                "--yolo",
+                "--cost-limit",
+                "0",
+                "-i",
+                "sympy__sympy-15599",
+                "-o",
+                "trajectory.json",
+            ],
+            cwd=PROJECT_ROOT,
+            env={
+                **os.environ,
+                "MSWEA_COST_TRACKING": "ignore_errors",
+            },
+        )
 
-    run_script = BashOperator(
-        task_id="mini-swe-bench-single",
-        bash_command=f"{PROJECT_ROOT}/mini-swe-bench-single.sh ",
-        cwd=str(PROJECT_ROOT),
-        env={
-            "NEBIUS_API_KEY": "{{ var.value.NEBIUS_API_KEY }}",
-        },
-        append_env=True,
-    )
+    run_script()
+
+
+my_dag()

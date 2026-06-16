@@ -8,3 +8,8 @@ dependencies = [
     "mini-swe-agent>=2.4.1",
     "swebench>=4.1.0",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.17",
+]
