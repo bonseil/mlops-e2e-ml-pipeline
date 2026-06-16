@@ -43,26 +43,90 @@ Your goal is to turn these ad-hoc scripts from `scripts/` into a proper, configu
 As a starting point with Airflow, you are provided with `run-airflow-standalone.sh` and a dag in `dags/` that re-implements `scripts/mini-swe-bench-single.sh`.
 
 **Airflow pipeline requirements**:
-- Configurable from Airflow parameters: `--split`, `--subset`, `--worker`. No hard-code.
+- Configurable from Airflow parameters. Required params: `split`, `subset`, `workers`. Useful optional params: `model`, `task_slice`, `run_id`, and `cost_limit`. No hard-code for experiment values.
 - All run artifacts are properly structured. E.g.,
 ```
 runs/
   <<run-id>>/
+    config.json
     run-agent/
       astropy__astropy-12907/
       preds.json
     run-eval/
+    metrics.json
+    manifest.json
 ```
-- Run artifacts are saved to a remote long-term storage, such as Object Storage (S3).
-- It's possible to re-construct the run based on the produced `<<run-id>>` folder: input SWE-bench tasks, configuration, output trajectories, etc. Basically, you can just send a directory to someone -- and they will be able to grab the whole picture.
-- Airflow pipelines uses `DockerOperator` to run the scripts in isolated environments, instead of calling `uv run`. `Dockerfile` for the project is provided. In large-scale production, `DockerOperator` can be replaced with `KubernetesPodOperator`.
+- It's possible to re-construct the run based on the produced `<<run-id>>` folder: input SWE-bench tasks, configuration, output trajectories, predictions, evaluation logs, metrics, etc. Basically, you can just send a directory to someone -- and they will be able to grab the whole picture.
 - Each run metrics and parameters are logged to `MLflow`, one can easily compare different runs.
+- The easy-mode solution may call the scripts from Airflow with Python/Bash tasks. For a production-style solution, use `DockerOperator` to run the scripts in isolated environments. `Dockerfile` for the project is provided. In large-scale production, `DockerOperator` can be replaced with `KubernetesPodOperator`.
+- For the full solution, run artifacts are saved to remote long-term storage, such as Object Storage (S3). If you skip remote storage in the first iteration, still write a clear local `runs/<run-id>/` folder and document how it would be uploaded.
 
 **Deployment**
-1. Airflow is deployed locally on a VM using `docker compose`: https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html#running-airflow-in-docker
-2. MLflow is deployed locally as a part of the same `docker-compose.yaml`.
+1. Easy mode: run Airflow with `run-airflow-standalone.sh` and focus on making the DAG configurable and reproducible.
+2. Production-style mode: deploy Airflow and MLflow locally on the VM using `docker compose`: https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html#running-airflow-in-docker
+3. MLflow should be reachable from the VM and used by the DAG to log parameters, metrics, and artifact references.
 
 Ultimately, the pipeline may look like: `run-mini-swe-agent` -> `swe-bench-eval` -> `log-artifacts-to-s3` -> `log-metrics-to-mlflow`.
+
+## Suggested Implementation Path
+
+You do not need to become a mini-swe-agent or SWE-bench expert to finish the first useful iteration. The cloned upstream repositories are there for debugging and deeper understanding. The fastest path is to finish the orchestration skeleton first, then improve isolation and deployment.
+
+### Phase 1: Speedrun Working DAG
+
+Goal: one Airflow button starts a small SWE-bench batch, evaluates it, and writes a reproducible run directory.
+
+Start from `dags/mini-swe-bench-single.py` and create `dags/evaluate_agent.py`, or extend the existing DAG. Keep the first version simple and explicit:
+
+1. `prepare_run`: read Airflow params and create `runs/<run-id>/config.json`.
+2. `run_agent`: run `scripts/mini-swe-bench-batch.sh` or an equivalent helper with the selected params, and write trajectories plus `preds.json` to `runs/<run-id>/run-agent/`.
+3. `run_eval`: run `scripts/swe-bench-eval.sh` using that `preds.json`, and write SWE-bench logs and reports to `runs/<run-id>/run-eval/`.
+4. `summarize_and_log`: parse evaluation reports, write `runs/<run-id>/metrics.json`, and log params, metrics, and the artifact path to MLflow.
+
+Recommended helper functions for easy mode:
+
+```python
+build_run_config(params) -> dict
+prepare_run_dir(run_config) -> Path
+run_agent_batch(run_config, run_dir) -> Path
+run_swebench_eval(run_config, preds_path, run_dir) -> Path
+collect_metrics(eval_dir) -> dict
+log_mlflow_run(run_config, metrics, artifact_uri) -> None
+```
+
+You may implement these helpers directly inside the DAG at first. If the code grows, move them into `src/` or `pipeline/`.
+
+Minimum Airflow params: `split`, `subset`, `workers`, `model`, `task_slice`, `run_id`, `cost_limit`.
+
+### Phase 2: Make The Run Durable
+
+Goal: a teammate can understand the whole run from one folder or one artifact URI.
+
+Make sure every run produces this shape:
+
+```text
+runs/<run-id>/
+  config.json
+  run-agent/
+    preds.json
+    trajectories/
+  run-eval/
+    logs/
+    reports/
+  metrics.json
+  manifest.json
+```
+
+`manifest.json` should point to the important files and record where full artifacts live. For full credit, upload the run folder or a compressed copy to Object Storage (S3) and log that URI to MLflow.
+
+### Phase 3: Production Polish
+
+After the speedrun works, improve the engineering around it:
+
+- Replace direct subprocess calls with `DockerOperator` tasks that use the provided `Dockerfile`.
+- Run Airflow and MLflow through `docker-compose.yaml`.
+- Add sensible retries and timeouts around agent, evaluation, upload, and MLflow logging steps.
+- Keep inspecting the cloned mini-swe-agent and SWE-bench repositories only when you need to understand trajectory format, prediction format, or evaluation output.
 
 ---
 
@@ -73,8 +137,8 @@ By the end of the assignment you should be able to:
 - Model an ML experiment as a pipeline with explicit inputs, outputs, retries, and dependencies.
 - Use Airflow for orchestration instead of manual shell ordering.
 - Track experiment configs, datasets, model IDs, metrics, artifacts, and logs in MLflow.
-- Run coding-agent evaluations in user-provided Docker images and collect reproducible outputs.
-- Deploy and use the mini-swe-agent trajectory viewer to inspect what happened inside an agent run.
+- Run coding-agent evaluations in reproducible execution environments, with Docker images as the production-style path.
+- Inspect mini-swe-agent trajectories to understand what happened inside an agent run.
 - Compare multiple experiments without losing track of which code, prompt, dataset, and model produced each result.
 
 If done carefully, this assignment teaches the practical MLOps discipline that research code usually lacks: durability, repeatability, provenance, and operational visibility.
@@ -138,7 +202,6 @@ Set up the starter repo:
 ```bash
 git clone <repo-url>
 cd <repo-folder>
-uv sync
 cp .env.example .env
 ```
 
@@ -177,24 +240,34 @@ Congratulations! You are all set.
 
 ## Final Deliverables
 
-By the end of the mandatory assignment, your repo should contain:
+By the end of the mandatory assignment, your repo should contain enough code and evidence for someone else to run a small evaluation and understand the result.
 
-| File or directory | What it is |
+### Minimum Working Submission
+
+| File or directory | What to add or finish |
 |---|---|
-| `REPORT.md` | Final writeup with architecture, run instructions, experiment results, artifact layout, and rerun notes |
-| `docker-compose.yaml` | VM deployment for Airflow and MLflow |
-| `Dockerfile` | Execution image used by Airflow `DockerOperator` tasks |
-| `dags/` | Configurable Airflow DAG for `run-mini-swe-agent -> swe-bench-eval -> log-artifacts-to-s3 -> log-metrics-to-mlflow` |
-| `scripts/` | Runnable agent and evaluation entrypoints used by the DAG |
-| `.env.example` | Non-secret environment template for Airflow, MLflow, S3/Object Storage, and inference credentials |
-| `runs/` manifest or sample run folder | Structured run evidence, for example `runs/<run-id>/run-agent/...` and `runs/<run-id>/run-eval/...` |
-| S3/Object Storage references | Long-term artifact location for full run outputs |
-| MLflow experiment runs | Logged parameters, metrics, run IDs, and artifact references for completed evaluations |
+| `dags/evaluate_agent.py` or an updated DAG in `dags/` | A configurable Airflow DAG with `prepare_run`, `run_agent`, `run_eval`, and `summarize_and_log` tasks |
+| Airflow params | At minimum: `split`, `subset`, and `workers`; optional but useful: `model`, `task_slice`, `run_id`, `cost_limit` |
+| `scripts/mini-swe-bench-batch.sh` or wrapper code | A way for the DAG to run mini-swe-agent with DAG-provided params and write outputs into `runs/<run-id>/run-agent/` |
+| `scripts/swe-bench-eval.sh` or wrapper code | A way for the DAG to evaluate the produced `preds.json` and write logs/reports into `runs/<run-id>/run-eval/` |
+| `runs/<run-id>/` sample or manifest | A reproducible run folder containing `config.json`, predictions, trajectories or trajectory references, evaluation logs/reports, `metrics.json`, and `manifest.json` |
+| MLflow run | Logged params, metrics, `run_id`, and artifact path or artifact URI for at least one completed evaluation |
+| `REPORT.md` | Short writeup with architecture, how to trigger the DAG, artifact layout, MLflow link/screenshot, one completed run, and rerun instructions |
+
+This is the speedrun path: complete the existing scaffold, make the DAG configurable, save the outputs in one place, and log enough to MLflow to compare runs.
+
+### Production-Style Additions
+
+| File or directory | What it adds |
+|---|---|
+| `Dockerfile` | Repeatable execution environment for agent and evaluation steps |
+| `DockerOperator` usage in the DAG | Isolated execution instead of local subprocess calls |
+| `docker-compose.yaml` | Docker Compose deployment for Airflow and MLflow on the VM |
+| `.env.example` | Non-secret environment template for Airflow, MLflow, Object Storage, and inference credentials |
+| S3/Object Storage upload | Long-term storage for full `runs/<run-id>/` artifacts |
 | `screenshots/airflow_dag.png` | Airflow UI showing the completed evaluation pipeline |
 | `screenshots/mlflow_runs.png` | MLflow UI showing logged evaluation runs and metrics |
 | `screenshots/object_storage_artifacts.png` | Object Storage UI, CLI output, or equivalent evidence showing uploaded run artifacts |
-
-The repository should be enough to deploy the stack on a fresh VM, trigger an evaluation from Airflow parameters, and find the complete evidence for a run by its `run-id`.
 
 If full artifacts are too large to commit, commit a small manifest or example folder and include the remote artifact URI in `REPORT.md`.
 
@@ -206,7 +279,7 @@ We care more about engineering judgment and traceability than about one lucky me
 
 | Area | Weight | What a strong submission shows |
 |---|---:|---|
-| **Configurable Airflow DAG** | 35% | The DAG implements the `run-agent -> run-evaluation` workflow, exposes `split`, `subset`, and `worker` as parameters, avoids hard-coded experiment values, and can be triggered reliably from the Airflow UI. A strong standalone Airflow solution is acceptable here. |
+| **Configurable Airflow DAG** | 35% | The DAG implements the `run-agent -> run-evaluation` workflow, exposes `split`, `subset`, and `workers` as parameters, avoids hard-coded experiment values, and can be triggered reliably from the Airflow UI. A strong standalone Airflow solution is acceptable here. |
 | **Artifact structure and reproducibility** | 20% | Each run writes a structured `runs/<run-id>/` tree and includes enough inputs, outputs, trajectories, predictions, logs, and reports to reconstruct the run. Extra credit within this area for uploading artifacts to S3/Object Storage. |
 | **MLflow tracking** | 15% | Runs log parameters, metrics, run IDs, and artifact references so multiple evaluations can be compared in the MLflow UI. |
 | **Execution isolation** | 10% | Agent and evaluation work run in a documented, repeatable environment. `DockerOperator` with the project `Dockerfile` is the preferred production-style solution, but a clear standalone Airflow implementation without `DockerOperator` can still receive most of the credit if it is reproducible. |
