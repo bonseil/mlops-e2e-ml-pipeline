@@ -1,39 +1,19 @@
 import json
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 import os
-from airflow.providers.docker.operators.docker import DockerOperator
-from docker.types import Mount
+import shutil
+#import mlflow
+
 from airflow.sdk import dag, task, Param
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RUNS_ROOT = PROJECT_ROOT / "runs"                 # host world
-CONTAINER_RUNS = "/mlops-assignment/runs"         # container world
+RUNS_ROOT = PROJECT_ROOT / "runs"
 
-def _read_env_key(name: str) -> str:
-    env_file = PROJECT_ROOT / ".env"
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            line = line.strip()
-            if line.startswith("export "):
-                line = line[len("export "):]
-            if "=" in line:
-                k, v = line.split("=", 1)
-                if k.strip() == name:
-                    return v.strip().strip("'\"")
-    return os.environ.get(name, "")
-
-NEBIUS_API_KEY = _read_env_key("NEBIUS_API_KEY")
-HF_TOKEN = _read_env_key("HF_TOKEN")
-if not NEBIUS_API_KEY:
-    raise ValueError("NEBIUS_API_KEY missing: set it in .env or the environment")
-
-class TemplatedDockerOperator(DockerOperator):
-    template_fields = (*DockerOperator.template_fields, "working_dir")
 
 @dag(
-    dag_id="evaluate_agent",
+    dag_id="evaluate_agent_no_docker",
     start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
@@ -46,12 +26,7 @@ class TemplatedDockerOperator(DockerOperator):
         "run_id": Param("", type="string"),   # empty -> auto-generate
         "cost_limit": Param(3, type="number"),
     },
-    default_args={
-        "retries": 1,
-        "retry_delay": timedelta(minutes=1),
-    },
 )
-
 def evaluate_agent():
 
     @task
@@ -62,77 +37,73 @@ def evaluate_agent():
             p["run_id"] = datetime.now().strftime("run-%Y%m%d-%H%M%S")
         run_dir = RUNS_ROOT / p["run_id"]
         run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "run-eval").mkdir(exist_ok=True)
-        DATASETS = {
+        (run_dir / "config.json").write_text(json.dumps(p, indent=2))
+        return p  # goes to XCom; downstream tasks receive it
+
+    @task
+    def run_agent(cfg: dict) -> str:
+        agent_dir = RUNS_ROOT / cfg["run_id"] / "run-agent"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+
+        subprocess.run(
+            [  # 1. argv: the command itself
+                "uv", "run", "mini-extra", "swebench",
+                "--subset", cfg["subset"],
+                "--split", cfg["split"],
+                "--model", cfg["model"],
+                "--slice", cfg["task_slice"],
+                "--workers", str(cfg["workers"]),
+                "-o", str(agent_dir),
+            ],
+            cwd=PROJECT_ROOT,  # 2. directory to run it from
+            env={  # 3. environment variables for the child process
+                **os.environ,
+                "MSWEA_COST_TRACKING": "ignore_errors",
+                "MSWEA_GLOBAL_COST_LIMIT": str(cfg["cost_limit"]),
+            },
+            check=True,  # 4. raise if exit code != 0
+        )
+        return str(agent_dir / "preds.json")
+
+    @task
+    def run_eval(cfg: dict, preds_path: str) -> str:
+        """logs/reports under runs/<run-id>/run-eval/. Return eval dir."""
+        eval_dir = RUNS_ROOT / cfg["run_id"] / "run-eval"
+        eval_dir.mkdir(parents=True, exist_ok=True)
+
+        dataset={
             "verified": "princeton-nlp/SWE-bench_Verified",
             "lite": "princeton-nlp/SWE-bench_Lite",
             "full": "princeton-nlp/SWE-bench",
         }
-        p["dataset_name"] = DATASETS[p["subset"]]  # KeyError = loud, good
+        subprocess.run(
+            [  # 1. argv: the command itself
+                "uv",
+                "run",
+                "python", "-m",
+                "swebench.harness.run_evaluation",
+                "--dataset_name", dataset[str(cfg["subset"])],
+                "--predictions_path", preds_path,
+                "--split", cfg["split"],
+#                "--model", cfg["model"],
+                "--max_workers", str(cfg["workers"]),
+                "--run_id", cfg["run_id"],
+                "--report_dir", str(eval_dir),
+            ],
+            cwd=PROJECT_ROOT,  # 2. directory to run it from
+            check=True,  # 4. raise if exit code != 0
+        )
+        # The harness writes relative to cwd — relocate outputs into the run folder.
+        report_name = f"{cfg['model'].replace('/', '__')}.{cfg['run_id']}.json"
 
-        (run_dir / "config.json").write_text(json.dumps(p, indent=2))
-        return p  # goes to XCom; downstream tasks receive it
+        src_report = PROJECT_ROOT / report_name
+        if src_report.exists():
+            shutil.move(str(src_report), str(eval_dir / report_name))
 
-    run_agent = DockerOperator(
-        task_id="run_agent",
-        image="mlops-eval:latest",
-        command=[
-            "mini-extra","swebench",
-            "--subset","{{ ti.xcom_pull(task_ids='prepare_run')['subset'] }}",
-            "--split","{{ ti.xcom_pull(task_ids='prepare_run')['split'] }}",
-            "--model","{{ ti.xcom_pull(task_ids='prepare_run')['model'] }}",
-            "--slice","{{ ti.xcom_pull(task_ids='prepare_run')['task_slice'] }}",
-            "--workers","{{ ti.xcom_pull(task_ids='prepare_run')['workers'] }}",
-            "-o",CONTAINER_RUNS +"/{{ ti.xcom_pull(task_ids='prepare_run')['run_id'] }}/run-agent",
-        ],
-        environment={
-            "MSWEA_COST_TRACKING": "ignore_errors",
-            "MSWEA_GLOBAL_COST_LIMIT": "{{ ti.xcom_pull(task_ids='prepare_run')['cost_limit'] }}",
-        },
-        private_environment={
-            "NEBIUS_API_KEY": NEBIUS_API_KEY,
-            "HF_TOKEN": HF_TOKEN
-        },
-        mounts=[
-            Mount(source=str(RUNS_ROOT), target="/mlops-assignment/runs", type="bind"),
-            Mount(
-                source="/var/run/docker.sock",
-                target="/var/run/docker.sock",
-                type="bind",
-            ),
-        ],
-        mount_tmp_dir=False,
-        auto_remove="success",
-        retries=0,
-        execution_timeout=timedelta(hours=1),
-    )
-
-    XC = "{{ ti.xcom_pull(task_ids='prepare_run')"  # readability helper
-
-    run_eval = TemplatedDockerOperator (
-        task_id="run_eval",
-        image="mlops-eval:latest",
-        command=[
-            "python", "-m", "swebench.harness.run_evaluation",
-            "--dataset_name", XC + "['dataset_name'] }}",
-            "--predictions_path", CONTAINER_RUNS + "/" + XC + "['run_id'] }}/run-agent/preds.json",
-            "--split", XC + "['split'] }}",
-            "--max_workers", XC + "['workers'] }}",
-            "--run_id", XC + "['run_id'] }}",
-        ],
-        working_dir=CONTAINER_RUNS + "/" + XC + "['run_id'] }}/run-eval",
-        mounts=[
-            Mount(source=str(RUNS_ROOT), target=CONTAINER_RUNS, type="bind"),
-            Mount(
-                source="/var/run/docker.sock",
-                target="/var/run/docker.sock",
-                type="bind",
-            ),
-        ],
-        mount_tmp_dir=False,
-        auto_remove="success",
-        execution_timeout=timedelta(hours=1),
-    )
+        src_logs = PROJECT_ROOT / "logs" / "run_evaluation" / cfg["run_id"]
+        if src_logs.exists():
+            shutil.move(str(src_logs), str(eval_dir / "logs"))
+        return str(eval_dir)
 
     def _aggregate_from_instance_reports(eval_dir: Path) -> dict:
         """Fallback: scan per-instance report.json files"""
@@ -156,11 +127,6 @@ def evaluate_agent():
                 if inst_data.get("patch_successfully_applied") is True:
                     applied += 1
 
-        if total == 0:
-            raise FileNotFoundError(
-                f"No per-instance report.json files found under {eval_dir}"
-            )
-
         return {
             "total_instances": total,
             "submitted_instances": total,
@@ -170,17 +136,31 @@ def evaluate_agent():
         }
 
     @task
-    def summarize_and_log(cfg: dict) -> str:
+    def summarize_and_log(cfg: dict, eval_dir: str) -> str:
+        """Parse SWE-bench evaluation reports and write runs/<run-id>/metrics.json"""
+        # mlflow.log_metrics({
+        #     "resolved": metrics["resolved"],
+        #     "resolution_rate": metrics["resolution_rate"],
+        # })
+        # mlflow.log_artifact(str(metrics_path))
         run_id = cfg["run_id"]
         run_dir = RUNS_ROOT / run_id
         metrics_path = run_dir / "metrics.json"
 
-        eval_dir = RUNS_ROOT / run_id / "run-eval"
+        eval_dir = Path(eval_dir)
 
         # Primary: the aggregate report the harness writes to --report_dir.
         # Deterministic name: slashes in the model name become "__".
         report_name = f"{cfg['model'].replace('/', '__')}.{run_id}.json"
         report_path = eval_dir / report_name
+
+
+        # Look for the main summary report (most common locations)
+        report_candidates = [
+            eval_dir / "results.json",  # common top-level
+            eval_dir / f"{cfg['model'].replace('/', '__')}.{run_id}.json",
+            list(eval_dir.glob("*.json"))[0] if list(eval_dir.glob("*.json")) else None,
+        ]
 
         if report_path.exists():
             report = json.loads(report_path.read_text())
@@ -226,7 +206,7 @@ def evaluate_agent():
                 "predictions": rel(run_dir / "run-agent" / "preds.json"),
                 "trajectories_dir": "run-agent",
                 "eval_report": rel(report_path) if report_path else None,
-                "eval_logs_dir": "run-eval/logs/run_evaluation/"+run_id +"/...",
+                "eval_logs_dir": "run-eval/logs",
                 "metrics": "metrics.json",
             },
             "instances": {
@@ -253,7 +233,8 @@ def evaluate_agent():
         return str(metrics_path)
 
     cfg = prepare_run()
-    final = summarize_and_log(cfg)
-    cfg >> run_agent >> run_eval >> final
+    preds = run_agent(cfg)
+    ev = run_eval(cfg, preds)
+    summarize_and_log(cfg, ev)
 
 evaluate_agent()
