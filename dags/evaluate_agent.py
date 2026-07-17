@@ -193,6 +193,34 @@ def evaluate_agent():
         metrics_path.write_text(json.dumps(metrics, indent=2))
         print(f"Metrics written to {metrics_path}")
         print(f"Resolved: {resolved}/{submitted} ({metrics['resolution_rate']}%)")
+
+        def rel(p):  # store paths relative to run_dir -> folder stays portable
+            return str(Path(p).relative_to(run_dir))
+
+        manifest = {
+            "run_id": run_id,
+            "created_at": datetime.now().isoformat(),
+            "config": cfg,  # full resolved params, inline
+            "files": {
+                "config": "config.json",
+                "predictions": rel(run_dir / "run-agent" / "preds.json"),
+                "trajectories_dir": "run-agent",
+                "eval_report": rel(report_path) if report_path else None,
+                "eval_logs_dir": "run-eval/logs",
+                "metrics": "metrics.json",
+            },
+            "instances": {
+                "submitted": submitted,
+                "resolved_ids": report.get("resolved_ids", []),
+                "unresolved_ids": report.get("unresolved_ids", []),
+            },
+            "storage": {
+                "local_path": str(run_dir),
+                "remote_uri": None,  # S3 task fills this later
+            },
+        }
+        (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+
         return str(metrics_path)
 
     cfg = prepare_run()
