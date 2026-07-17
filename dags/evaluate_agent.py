@@ -67,8 +67,7 @@ def evaluate_agent():
 
     @task
     def run_eval(cfg: dict, preds_path: str) -> str:
-        """TODO: call swebench harness on preds_path,
-        logs/reports under runs/<run-id>/run-eval/. Return eval dir."""
+        """logs/reports under runs/<run-id>/run-eval/. Return eval dir."""
         eval_dir = RUNS_ROOT / cfg["run_id"] / "run-eval"
         eval_dir.mkdir(parents=True, exist_ok=True)
 
