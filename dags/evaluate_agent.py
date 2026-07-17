@@ -221,6 +221,15 @@ def evaluate_agent():
         }
         (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
+        subprocess.run(
+            [
+                "uv","run","python","scripts/log_to_mlflow.py",
+                "--run-dir",str(run_dir),
+            ],
+            cwd=PROJECT_ROOT,
+            env={**os.environ, "MLFLOW_TRACKING_URI": "http://localhost:5000"},
+            check=True,
+        )
         return str(metrics_path)
 
     cfg = prepare_run()
