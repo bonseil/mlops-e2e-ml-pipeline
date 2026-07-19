@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "apache-airflow>=3.3.0",
+    "boto3>=1.43.51",
     "mini-swe-agent>=2.4.1",
     "mlflow>=3.14.0",
     "mlflow-skinny>=3.14.0",

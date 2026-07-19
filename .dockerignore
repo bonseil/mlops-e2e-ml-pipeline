@@ -4,4 +4,4 @@ runs/
 logs/
 mlruns/
 .git/
-trajectory.json
+trajectory.jsonminio-data/

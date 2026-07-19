@@ -1,15 +1,18 @@
 import json
-import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 import os
 from airflow.providers.docker.operators.docker import DockerOperator
+from botocore.exceptions import ClientError
 from docker.types import Mount
 from airflow.sdk import dag, task, Param
+import mlflow
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = PROJECT_ROOT / "runs"                 # host world
 CONTAINER_RUNS = "/mlops-assignment/runs"         # container world
+HOST_PROJECT_DIR = os.environ.get("HOST_PROJECT_DIR", str(PROJECT_ROOT))
+HOST_RUNS = HOST_PROJECT_DIR + "/runs"
 
 def _read_env_key(name: str) -> str:
     env_file = PROJECT_ROOT / ".env"
@@ -94,9 +97,9 @@ def evaluate_agent():
             "HF_TOKEN": HF_TOKEN
         },
         mounts=[
-            Mount(source=str(RUNS_ROOT), target="/mlops-assignment/runs", type="bind"),
+            Mount(source=str(HOST_RUNS), target="/mlops-assignment/runs", type="bind"),
             Mount(
-                source="/var/run/docker.sock",
+                source='/var/run/docker.sock',
                 target="/var/run/docker.sock",
                 type="bind",
             ),
@@ -109,26 +112,34 @@ def evaluate_agent():
 
     XC = "{{ ti.xcom_pull(task_ids='prepare_run')"  # readability helper
 
-    run_eval = TemplatedDockerOperator (
+    run_eval = TemplatedDockerOperator(
         task_id="run_eval",
         image="mlops-eval:latest",
         command=[
-            "python", "-m", "swebench.harness.run_evaluation",
-            "--dataset_name", XC + "['dataset_name'] }}",
-            "--predictions_path", CONTAINER_RUNS + "/" + XC + "['run_id'] }}/run-agent/preds.json",
-            "--split", XC + "['split'] }}",
-            "--max_workers", XC + "['workers'] }}",
-            "--run_id", XC + "['run_id'] }}",
+            "python",
+            "-m",
+            "swebench.harness.run_evaluation",
+            "--dataset_name",
+            XC + "['dataset_name'] }}",
+            "--predictions_path",
+            CONTAINER_RUNS + "/" + XC + "['run_id'] }}/run-agent/preds.json",
+            "--split",
+            XC + "['split'] }}",
+            "--max_workers",
+            XC + "['workers'] }}",
+            "--run_id",
+            XC + "['run_id'] }}",
         ],
         working_dir=CONTAINER_RUNS + "/" + XC + "['run_id'] }}/run-eval",
         mounts=[
-            Mount(source=str(RUNS_ROOT), target=CONTAINER_RUNS, type="bind"),
+            Mount(source=str(HOST_RUNS), target=CONTAINER_RUNS, type="bind"),
             Mount(
                 source="/var/run/docker.sock",
                 target="/var/run/docker.sock",
                 type="bind",
             ),
         ],
+        private_environment={"HF_TOKEN": HF_TOKEN},
         mount_tmp_dir=False,
         auto_remove="success",
         execution_timeout=timedelta(hours=1),
@@ -170,7 +181,7 @@ def evaluate_agent():
         }
 
     @task
-    def summarize_and_log(cfg: dict) -> str:
+    def summarize(cfg: dict) -> str:
         run_id = cfg["run_id"]
         run_dir = RUNS_ROOT / run_id
         metrics_path = run_dir / "metrics.json"
@@ -226,7 +237,7 @@ def evaluate_agent():
                 "predictions": rel(run_dir / "run-agent" / "preds.json"),
                 "trajectories_dir": "run-agent",
                 "eval_report": rel(report_path) if report_path else None,
-                "eval_logs_dir": "run-eval/logs/run_evaluation/"+run_id +"/...",
+                "eval_logs_dir": "run-eval/logs/run_evaluation/"+run_id,
                 "metrics": "metrics.json",
             },
             "instances": {
@@ -240,20 +251,58 @@ def evaluate_agent():
             },
         }
         (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
-
-        subprocess.run(
-            [
-                "uv","run","python","scripts/log_to_mlflow.py",
-                "--run-dir",str(run_dir),
-            ],
-            cwd=PROJECT_ROOT,
-            env={**os.environ, "MLFLOW_TRACKING_URI": "http://localhost:5000"},
-            check=True,
-        )
         return str(metrics_path)
 
-    cfg = prepare_run()
-    final = summarize_and_log(cfg)
-    cfg >> run_agent >> run_eval >> final
 
+    @task
+    def upload_to_s3(cfg: dict) -> str:
+        import boto3
+
+        run_id = cfg["run_id"]
+        run_dir = RUNS_ROOT / run_id
+        bucket = os.environ["S3_BUCKET"]
+        uri = f"s3://{bucket}/runs/{run_id}/"
+
+        # we record destiny in the manifest BEFORE uploading, so the
+        #    uploaded manifest already points at its remote home
+        manifest_path = run_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["storage"]["remote_uri"] = uri
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+
+        # we walk run_dir, upload each file under runs/<run_id>/<relpath>
+        s3 = boto3.client("s3", endpoint_url=os.environ["S3_ENDPOINT_URL"])
+        try:
+            s3.head_bucket(Bucket=bucket)  # exists and accessible?
+        except ClientError:
+            s3.create_bucket(Bucket=bucket)  # no -> create it
+            print(f"Created bucket: {bucket}")
+        for path in run_dir.rglob("*"):
+            if path.is_file():
+                key = f"runs/{run_id}/{path.relative_to(run_dir)}"
+                s3.upload_file(str(path), bucket, key)
+        return uri
+
+    @task
+    def log_to_mlflow(cfg: dict, remote_uri:str) -> None:
+        run_id = cfg["run_id"]
+        run_dir = RUNS_ROOT / run_id
+        metrics = json.loads((run_dir / "metrics.json").read_text())
+
+        mlflow.set_experiment("agent-evals")
+        with mlflow.start_run(run_name=run_id):
+            mlflow.log_params({k: cfg[k] for k in
+                ["run_id", "model", "subset", "split", "task_slice", "workers", "cost_limit"]})
+            mlflow.log_metrics({k: metrics[k] for k in
+                ["submitted_instances", "resolved_instances", "resolution_rate"]})
+            mlflow.set_tag("artifact_path", str(run_dir))
+            mlflow.set_tag("remote_uri", remote_uri)
+            for f in ["config.json", "metrics.json", "manifest.json"]:
+                mlflow.log_artifact(str(run_dir / f))
+
+    cfg = prepare_run()
+    summary = summarize(cfg)
+    uri = upload_to_s3(cfg)
+    logged = log_to_mlflow(cfg, uri)
+    cfg >> run_agent >> run_eval >> summary >> uri >> logged
 evaluate_agent()
