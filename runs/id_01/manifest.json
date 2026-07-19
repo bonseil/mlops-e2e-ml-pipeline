@@ -1,0 +1,41 @@
+{
+  "run_id": "id_01",
+  "created_at": "2026-07-19T01:11:56.742173",
+  "config": {
+    "model": "nebius/moonshotai/Kimi-K2.6",
+    "split": "test",
+    "run_id": "id_01",
+    "subset": "verified",
+    "workers": 4,
+    "cost_limit": 2,
+    "task_slice": "5:9",
+    "dataset_name": "princeton-nlp/SWE-bench_Verified"
+  },
+  "files": {
+    "config": "config.json",
+    "predictions": "run-agent/preds.json",
+    "trajectories_dir": "run-agent",
+    "eval_report": "run-eval/nebius__moonshotai__Kimi-K2.6.id_01.json",
+    "eval_logs_dir": "run-eval/logs/run_evaluation/id_01",
+    "metrics": "metrics.json"
+  },
+  "instances": {
+    "submitted": 8,
+    "resolved_ids": [
+      "astropy__astropy-12907",
+      "astropy__astropy-13236",
+      "astropy__astropy-13579",
+      "astropy__astropy-14096",
+      "astropy__astropy-14182"
+    ],
+    "unresolved_ids": [
+      "astropy__astropy-13033",
+      "astropy__astropy-13398",
+      "astropy__astropy-13977"
+    ]
+  },
+  "storage": {
+    "local_path": "/opt/airflow/runs/id_01",
+    "remote_uri": "s3://bucket-agent-evals/runs/id_01/"
+  }
+}

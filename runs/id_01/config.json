@@ -1,0 +1,10 @@
+{
+  "split": "test",
+  "subset": "verified",
+  "workers": 4,
+  "model": "nebius/moonshotai/Kimi-K2.6",
+  "task_slice": "5:9",
+  "run_id": "id_01",
+  "cost_limit": 2,
+  "dataset_name": "princeton-nlp/SWE-bench_Verified"
+}

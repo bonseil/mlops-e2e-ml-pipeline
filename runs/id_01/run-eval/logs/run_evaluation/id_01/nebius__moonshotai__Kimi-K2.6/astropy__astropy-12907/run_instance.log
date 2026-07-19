@@ -1,0 +1,43 @@
+2026-07-19 00:47:44,810 - INFO - Creating container for astropy__astropy-12907...
+2026-07-19 00:47:44,899 - INFO - Container for astropy__astropy-12907 created: 8724d5929ea86309bc22827eaec77a227f80dcf15094b9fd3049701c20f1ae40
+2026-07-19 00:47:45,046 - INFO - Container for astropy__astropy-12907 started: 8724d5929ea86309bc22827eaec77a227f80dcf15094b9fd3049701c20f1ae40
+2026-07-19 00:47:45,047 - INFO - Intermediate patch for astropy__astropy-12907 written to logs/run_evaluation/id_01/nebius__moonshotai__Kimi-K2.6/astropy__astropy-12907/patch.diff, now applying to container...
+2026-07-19 00:47:45,162 - INFO - >>>>> Applied Patch:
+Checking patch astropy/modeling/separable.py...
+Applied patch astropy/modeling/separable.py cleanly.
+
+2026-07-19 00:47:45,550 - INFO - Git diff before:
+diff --git a/astropy/modeling/separable.py b/astropy/modeling/separable.py
+index a308e2729..45bea3608 100644
+--- a/astropy/modeling/separable.py
++++ b/astropy/modeling/separable.py
+@@ -242,7 +242,7 @@ def _cstack(left, right):
+         cright = _coord_matrix(right, 'right', noutp)
+     else:
+         cright = np.zeros((noutp, right.shape[1]))
+-        cright[-right.shape[0]:, -right.shape[1]:] = 1
++        cright[-right.shape[0]:, -right.shape[1]:] = right
+ 
+     return np.hstack([cleft, cright])
+2026-07-19 00:47:45,550 - INFO - Eval script for astropy__astropy-12907 written to logs/run_evaluation/id_01/nebius__moonshotai__Kimi-K2.6/astropy__astropy-12907/eval.sh; copying to container...
+2026-07-19 00:48:40,478 - INFO - Test runtime: 54.88 seconds
+2026-07-19 00:48:40,479 - INFO - Test output for astropy__astropy-12907 written to logs/run_evaluation/id_01/nebius__moonshotai__Kimi-K2.6/astropy__astropy-12907/test_output.txt
+2026-07-19 00:48:40,527 - INFO - Git diff after:
+diff --git a/astropy/modeling/separable.py b/astropy/modeling/separable.py
+index a308e2729..45bea3608 100644
+--- a/astropy/modeling/separable.py
++++ b/astropy/modeling/separable.py
+@@ -242,7 +242,7 @@ def _cstack(left, right):
+         cright = _coord_matrix(right, 'right', noutp)
+     else:
+         cright = np.zeros((noutp, right.shape[1]))
+-        cright[-right.shape[0]:, -right.shape[1]:] = 1
++        cright[-right.shape[0]:, -right.shape[1]:] = right
+ 
+     return np.hstack([cleft, cright])
+2026-07-19 00:48:40,527 - INFO - Grading answer for astropy__astropy-12907...
+2026-07-19 00:48:40,529 - INFO - report: {'astropy__astropy-12907': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': True, 'tests_status': {'FAIL_TO_PASS': {'success': ['astropy/modeling/tests/test_separable.py::test_separable[compound_model6-result6]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model9-result9]'], 'failure': []}, 'PASS_TO_PASS': {'success': ['astropy/modeling/tests/test_separable.py::test_coord_matrix', 'astropy/modeling/tests/test_separable.py::test_cdot', 'astropy/modeling/tests/test_separable.py::test_cstack', 'astropy/modeling/tests/test_separable.py::test_arith_oper', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model0-result0]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model1-result1]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model2-result2]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model3-result3]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model4-result4]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model5-result5]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model7-result7]', 'astropy/modeling/tests/test_separable.py::test_separable[compound_model8-result8]', 'astropy/modeling/tests/test_separable.py::test_custom_model_separable'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for astropy__astropy-12907: resolved: True
+2026-07-19 00:48:40,529 - INFO - Attempting to stop container sweb.eval.astropy__astropy-12907.id_01...
+2026-07-19 00:48:55,678 - INFO - Attempting to remove container sweb.eval.astropy__astropy-12907.id_01...
+2026-07-19 00:48:55,714 - INFO - Container sweb.eval.astropy__astropy-12907.id_01 removed.
